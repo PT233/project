@@ -1,5 +1,5 @@
 dataset: dlbcl
-data_root: data/dlbcl/
+data_root: ""
 split_dir: data/splits/
 
 model: efficientnet_b2

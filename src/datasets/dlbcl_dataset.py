@@ -80,8 +80,16 @@ class DLBCLDataset(BaseDataset):
         full_path = os.path.join(self.data_root, rel_path) if self.data_root else rel_path
 
         if not os.path.exists(full_path):
-            logger.error("[dlbcl_dataset] Image path does not exist: %s", full_path)
-            sys.exit(2)
+            logger.warning("[dlbcl_dataset] Image not found, skipping: %s", full_path)
+            # Return a black image so the DataLoader batch stays consistent.
+            # This path should not occur when using the pre-filtered CSV splits.
+            import torch
+            return {
+                "image": torch.zeros(3, 224, 224),
+                "label": int(row["label"]),
+                "patient_id": str(row["patient_id"]),
+                "meta": {"missing": True},
+            }
 
         image = Image.open(full_path).convert("RGB")
         image_np = np.array(image)

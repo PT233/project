@@ -103,7 +103,7 @@ def build_datasets(config: dict):
     split_dir = config["split_dir"]
 
     # Validate paths
-    if not os.path.exists(data_root):
+    if data_root and not os.path.exists(data_root):
         _log.error("data_root does not exist: %s", data_root)
         sys.exit(2)
     if not os.path.exists(split_dir):
@@ -127,8 +127,8 @@ def build_datasets(config: dict):
         val_ds = BreaKHisDataset(csv_path=val_csv, data_root=data_root, mode="val")
 
     elif dataset_name == "dlbcl":
-        train_csv = os.path.join(split_dir, "train.csv")
-        val_csv = os.path.join(split_dir, "val.csv")
+        train_csv = os.path.join(split_dir, "dlbcl_train.csv")
+        val_csv = os.path.join(split_dir, "dlbcl_val.csv")
         if not os.path.exists(train_csv):
             _log.error("Train CSV not found: %s", train_csv)
             sys.exit(2)
@@ -179,7 +179,7 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         if amp_enabled and scaler is not None:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast("cuda"):
                 logits = model(images)
                 loss = criterion(logits, labels)
             scaler.scale(loss).backward()
@@ -223,7 +223,7 @@ def validate(
         labels = batch["label"].to(device, non_blocking=True)
 
         if amp_enabled:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast("cuda"):
                 logits = model(images)
                 loss = criterion(logits, labels)
         else:
@@ -393,7 +393,7 @@ def train(config_path: str, resume_path: str | None = None) -> None:
     criterion = nn.CrossEntropyLoss()
 
     # ── AMP scaler ──────────────────────────────────────────────────────────
-    scaler = torch.cuda.amp.GradScaler() if amp_enabled else None
+    scaler = torch.amp.GradScaler("cuda") if amp_enabled else None
 
     # ── Resume ──────────────────────────────────────────────────────────────
     start_epoch = 0
@@ -413,7 +413,11 @@ def train(config_path: str, resume_path: str | None = None) -> None:
     # ── Training loop ────────────────────────────────────────────────────────
     dataset_name = config["dataset"]
     # DLBCL uses best_dlbcl.pth per task.md #013 DoD; BreaKHis uses best.pth
-    best_ckpt_name = "best_dlbcl.pth" if dataset_name == "dlbcl" else "best.pth"
+    # config["checkpoint_name"] overrides the default if present
+    if config.get("checkpoint_name"):
+        best_ckpt_name = config["checkpoint_name"]
+    else:
+        best_ckpt_name = "best_dlbcl.pth" if dataset_name == "dlbcl" else "best.pth"
     best_ckpt_path = os.path.join(CKPT_DIR, best_ckpt_name)
     last_ckpt_path = os.path.join(CKPT_DIR, "last.pth")
 

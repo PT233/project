@@ -20,6 +20,12 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
+
+# Ensure project root is on sys.path so 'src.*' imports work regardless of cwd.
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 import torch
 import yaml
@@ -128,7 +134,7 @@ def build_dataset(cfg: dict):
         _log.error("split_dir does not exist: %s", split_dir)
         sys.exit(2)
 
-    if not os.path.exists(data_root):
+    if data_root and not os.path.exists(data_root):
         _log.error("data_root does not exist: %s", data_root)
         sys.exit(2)
 
@@ -352,6 +358,12 @@ def main():
 
 
 if __name__ == "__main__":
+    # If CLI args are provided, run as normal CLI tool.
+    # Otherwise, run the built-in DoD verification with fake data.
+    if "--config" in sys.argv and "--checkpoint" in sys.argv:
+        main()
+        sys.exit(0)
+
     # -----------------------------------------------------------------------
     # DoD verification: run full pipeline with fake checkpoint + fake dataset
     # -----------------------------------------------------------------------

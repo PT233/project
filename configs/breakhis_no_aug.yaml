@@ -12,6 +12,9 @@ lr: 1.0e-4
 weight_decay: 1.0e-5
 epochs: 30
 amp: true
+augmentation: false
+
+checkpoint_name: best_no_aug.pth
 
 wandb:
   project: cancer-histo-breakhis
