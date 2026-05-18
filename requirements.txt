@@ -1,0 +1,46 @@
+# Cancer Histology Classification — Python dependencies
+# Fixed versions for reproducibility (Python 3.10.*)
+#
+# NOTE: torch and torchvision must be installed separately with the CUDA index URL:
+#   pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 \
+#       --index-url https://download.pytorch.org/whl/cu121
+# They are listed below for documentation purposes but will NOT resolve correctly
+# via a plain `pip install -r requirements.txt` without the index URL.
+#
+# Recommended full setup:
+#   conda create -n cancer-histo python=3.10 -y
+#   conda activate cancer-histo
+#   pip install torch==2.2.2+cu121 torchvision==0.17.2+cu121 --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements.txt
+
+# Deep learning (install manually with --index-url, see above)
+# torch==2.2.2+cu121
+# torchvision==0.17.2+cu121
+
+# Model library
+timm==0.9.16
+
+# Computer vision
+opencv-python==4.9.0.80
+albumentations==1.4.3
+Pillow==10.3.0
+
+# Explainability
+grad-cam==1.4.8
+
+# Configuration
+pyyaml==6.0.1
+
+# Data processing
+pandas==2.2.1
+scikit-learn==1.4.1
+
+# Experiment tracking
+wandb==0.16.6
+
+# Visualization
+matplotlib==3.8.4
+seaborn==0.13.2
+
+# Utilities
+tqdm==4.66.2
