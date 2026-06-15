@@ -16,18 +16,32 @@ Environment variables required:
 import logging
 import os
 import sys
+from pathlib import Path
 
 import wandb
 
-# ---------------------------------------------------------------------------
 # Module-level logger — error format: [ERROR][logger] <message>
-# ---------------------------------------------------------------------------
 _log = logging.getLogger("logger")
 _handler = logging.StreamHandler(sys.stderr)
 _handler.setFormatter(logging.Formatter("[%(levelname)s][%(name)s] %(message)s"))
 _log.addHandler(_handler)
 _log.setLevel(logging.DEBUG)
 _log.propagate = False  # prevent double-printing via root logger
+
+
+def _load_dotenv_if_present() -> None:
+    """Load simple KEY=VALUE entries from .env without requiring python-dotenv."""
+    project_root = Path(__file__).resolve().parents[2]
+    for env_path in (Path.cwd() / ".env", project_root / ".env"):
+        if not env_path.exists():
+            continue
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        return
 
 
 class WandbLogger:
@@ -42,7 +56,16 @@ class WandbLogger:
     """
 
     def __init__(self, config: dict, project: str) -> None:
-        # DoD ④: WANDB_API_KEY must be set; exit(1) otherwise.
+        _load_dotenv_if_present()
+
+        project_root = Path(__file__).resolve().parents[2]
+        wandb_dir = Path(
+            os.environ.get("WANDB_DIR", str(project_root / "artifacts" / "wandb"))
+        )
+        wandb_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["WANDB_DIR"] = str(wandb_dir)
+
+        # spec ④: WANDB_API_KEY must be set; exit(1) otherwise.
         api_key = os.environ.get("WANDB_API_KEY", "")
         if not api_key:
             _log.error("WANDB_API_KEY not set")
@@ -77,30 +100,5 @@ class WandbLogger:
             self._run = None
 
 
-# ---------------------------------------------------------------------------
 # __main__ validation block — verifies the class can be instantiated and
 # called without a live W&B connection (uses wandb offline mode).
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    import os
-
-    # Check for WANDB_API_KEY before attempting anything
-    if not os.environ.get("WANDB_API_KEY"):
-        # Simulate missing key scenario to show correct error format, then exit
-        _log.error("WANDB_API_KEY not set")
-        sys.exit(1)
-
-    # Run in offline mode so no real network call is made
-    os.environ.setdefault("WANDB_MODE", "offline")
-
-    print("Initialising WandbLogger in offline mode …")
-    logger = WandbLogger(config={"lr": 1e-4, "epochs": 1}, project="test")
-    print("WandbLogger initialised successfully.")
-
-    logger.log({"loss": 0.5})
-    print("log({'loss': 0.5}) — OK")
-
-    logger.finish()
-    print("finish() — OK")
-
-    print("All DoD checks passed.")

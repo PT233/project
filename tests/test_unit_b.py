@@ -23,9 +23,7 @@ from src.models.classifier import build_classifier  # noqa: E402
 from src.models.gradcam import generate_gradcam      # noqa: E402
 
 
-# ---------------------------------------------------------------------------
 # Fixtures
-# ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
 def model_2class():
@@ -66,9 +64,7 @@ def fake_checkpoint_and_image(tmp_path_factory):
     return str(ckpt_path), str(img_path), str(out_dir)
 
 
-# ---------------------------------------------------------------------------
 # UT-10: build_classifier returns nn.Module with correct output features
-# ---------------------------------------------------------------------------
 
 class TestUT10:
     def test_returns_nn_module(self):
@@ -95,9 +91,7 @@ class TestUT10:
         )
 
 
-# ---------------------------------------------------------------------------
 # UT-11: forward pass produces shape (2, 2)
-# ---------------------------------------------------------------------------
 
 class TestUT11:
     def test_forward_output_shape(self, model_2class):
@@ -110,9 +104,7 @@ class TestUT11:
         )
 
 
-# ---------------------------------------------------------------------------
 # UT-12: softmax probabilities sum to 1.0 (per sample)
-# ---------------------------------------------------------------------------
 
 class TestUT12:
     def test_softmax_sums_to_one(self, model_2class):
@@ -127,9 +119,7 @@ class TestUT12:
         )
 
 
-# ---------------------------------------------------------------------------
 # UT-13: generate_gradcam returns an ndarray with shape (H, W, 3)
-# ---------------------------------------------------------------------------
 
 class TestUT13:
     def test_gradcam_returns_overlay_png(self, fake_checkpoint_and_image):
@@ -157,9 +147,7 @@ class TestUT13:
         )
 
 
-# ---------------------------------------------------------------------------
 # UT-14: overlay pixel mean is in (10, 245)
-# ---------------------------------------------------------------------------
 
 class TestUT14:
     def test_gradcam_pixel_mean_in_range(self, fake_checkpoint_and_image):

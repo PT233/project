@@ -8,8 +8,8 @@
 #   bash run_training.sh --eval-only         # skip training, run evaluation only
 #
 # Prerequisites:
-#   1. conda env ai_dt with all packages installed
-#   2. WANDB_API_KEY set in environment or .env file
+#   1. conda env base with all packages installed
+#   2. WANDB runs in offline mode (set WANDB_MODE=offline; no API key needed)
 #   3. data/ populated (run prepare_data.sh first)
 
 set -euo pipefail
@@ -34,16 +34,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-CONDA="conda run -n ai_dt --no-capture-output python"
+CONDA="conda run -n base --no-capture-output python"
 RESULTS_DIR="results/checkpoints"
 mkdir -p "$RESULTS_DIR"
 
-# ── BreaKHis ─────────────────────────────────────────────────────────────────
+# BreaKHis
 run_breakhis() {
   echo ""
-  echo "========================================"
+  
   echo "  BreaKHis: 30-epoch training (#012)"
-  echo "========================================"
+  
 
   if [[ $EVAL_ONLY -eq 0 ]]; then
     $CONDA src/training/train.py --config configs/breakhis.yaml
@@ -64,7 +64,7 @@ run_breakhis() {
     --checkpoint "$CKPT"
 
   # Check AUC ≥ 0.85
-  python - <<PYEOF
+  IMG_LIST="$(python - <<'PYEOF'
 import json, sys
 with open("results/breakhis_eval.json") as f:
     r = json.load(f)
@@ -78,19 +78,17 @@ else:
 PYEOF
 }
 
-# ── DLBCL ─────────────────────────────────────────────────────────────────────
+# DLBCL
 run_dlbcl() {
   echo ""
-  echo "========================================"
   echo "  DLBCL: 30-epoch training (#013)"
-  echo "========================================"
 
   if [[ $EVAL_ONLY -eq 0 ]]; then
     $CONDA src/training/train.py --config configs/dlbcl.yaml
     echo "[OK] DLBCL training complete"
   fi
 
-  # Locate best checkpoint (DLBCL saves as best_dlbcl.pth per task.md DoD)
+  # Locate best checkpoint (DLBCL saves as best_dlbcl.pth)
   CKPT="$RESULTS_DIR/best_dlbcl.pth"
   if [[ ! -f "$CKPT" ]]; then
     # Fallback to best.pth if best_dlbcl.pth not yet renamed
@@ -119,12 +117,12 @@ else:
 PYEOF
 }
 
-# ── GradCAM (#016) ────────────────────────────────────────────────────────────
+# GradCAM (#016)
 run_gradcam() {
   echo ""
-  echo "========================================"
+  
   echo "  GradCAM visualization (#016)"
-  echo "========================================"
+  
 
   CKPT="$RESULTS_DIR/best.pth"
   OUT_DIR="results/gradcam"
@@ -162,7 +160,9 @@ selected = (
 )
 for p in selected:
     print(p)
-PYEOF | while read img_path; do
+PYEOF
+)"
+  echo "$IMG_LIST" | while read -r img_path; do
     echo "  GradCAM: $img_path"
     $CONDA src/models/gradcam.py \
       --image "$img_path" \
@@ -176,7 +176,7 @@ PYEOF | while read img_path; do
   [[ $N -ge 10 ]] && echo "[PASS] >= 10 PNGs" || echo "[WARN] Only $N PNGs generated"
 }
 
-# ── Dispatch ──────────────────────────────────────────────────────────────────
+# Dispatch
 case "$DATASET" in
   both)
     run_breakhis
@@ -197,4 +197,4 @@ case "$DATASET" in
 esac
 
 echo ""
-echo "=== run_training.sh complete ==="
+echo " ' run_training.sh complete   '"

@@ -1,0 +1,25 @@
+dataset: dlbcl_mil
+data_root: H:/1.MasterDegree/17.RD/project
+split_dir: data/splits/
+split_files:
+  train: dlbcl_survival_train.csv
+  val: dlbcl_survival_val.csv
+  test: dlbcl_survival_test.csv
+
+num_classes: 2
+pretrained: true
+attn_hidden: 128
+dropout: 0.25
+
+bag_size: 64
+bag_batch_size: 2
+num_workers: 0
+
+lr: 1.0e-4
+weight_decay: 1.0e-4
+epochs: 20
+amp: true
+label_smoothing: 0.1
+early_stop_patience: 6
+checkpoint_name: best_dlbcl_mil.pth
+stain_normalization: false

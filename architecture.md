@@ -1,115 +1,132 @@
-# architecture.md — 系统结构
+# Architecture
 
-> 接口细节见 [protocol.md](protocol.md)，运行环境见 [environment.md](environment.md)
+System structure for the cancer histology classification project. This document
+describes the file layout and the responsibility of each module.
 
-## 1. 文件与文件夹结构
+## File and directory layout
 
 ```
 project/
 ├── data/
-│   ├── breakhis/               # 原始图像，仅40×（不纳入git）
-│   ├── dlbcl/                  # 原始图像（不纳入git）
-│   └── splits/                 # CSV train/test splits（纳入git）
+│   ├── breakhis/                  # BreaKHis images, 40x (not tracked in git)
+│   ├── dlbcl/                     # DLBCL patches + clinical CSV (not tracked in git)
+│   └── splits/                    # split CSV files (tracked in git)
 │       ├── breakhis_train.csv
+│       ├── breakhis_val.csv
 │       ├── breakhis_test.csv
-│       ├── dlbcl_train.csv
-│       └── dlbcl_test.csv
+│       ├── dlbcl_survival_train.csv
+│       ├── dlbcl_survival_val.csv
+│       └── dlbcl_survival_test.csv
 │
 ├── src/
 │   ├── datasets/
-│   │   ├── base_dataset.py     # 抽象基类
-│   │   ├── breakhis_dataset.py # BreaKHis子类
-│   │   └── dlbcl_dataset.py    # DLBCL子类（含patch聚合）
+│   │   ├── base_dataset.py        # abstract dataset contract
+│   │   ├── breakhis_dataset.py    # BreaKHis 40x patch dataset
+│   │   ├── dlbcl_dataset.py       # DLBCL patch dataset
+│   │   └── dlbcl_bag_dataset.py   # DLBCL patient-bag dataset for MIL
 │   ├── models/
-│   │   ├── classifier.py       # EfficientNet-B2封装
-│   │   └── gradcam.py          # GradCAM热力图生成
+│   │   ├── classifier.py          # EfficientNet-B2 classifier factory
+│   │   ├── gradcam.py             # Grad-CAM overlay generation
+│   │   └── mil.py                 # EfficientNet-B2 + gated attention MIL (ABMIL)
 │   ├── training/
-│   │   ├── train.py            # 通用训练循环（AMP）
-│   │   └── evaluate.py         # 评估输出JSON
+│   │   ├── train.py               # patch-level training loop (AMP)
+│   │   ├── train_mil.py           # bag-level ABMIL training loop
+│   │   └── evaluate.py            # checkpoint evaluation, writes JSON
 │   └── utils/
-│       ├── augmentations.py    # 数据增强配置
-│       └── logger.py           # W&B封装
+│       ├── augmentations.py       # albumentations transform pipelines
+│       ├── logger.py              # Weights & Biases wrapper
+│       └── patient_aggregation.py # patch-to-patient probability aggregation
 │
 ├── configs/
 │   ├── breakhis.yaml
-│   └── dlbcl.yaml
+│   ├── dlbcl.yaml
+│   └── dlbcl_mil.yaml
 │
-├── notebooks/
-│   ├── eda_breakhis.ipynb
-│   └── eda_dlbcl.ipynb
+├── scripts/
+│   └── build_survival_split.py    # builds the DLBCL survival split (seed=42)
 │
-├── results/                    # 输出图表和JSON（不纳入git）
+├── artifacts/                     # checkpoints, eval JSON, wandb runs (not tracked in git)
 ├── requirements.txt
-├── .gitignore
-├── PRD.md
+├── README.md
 ├── architecture.md
-├── protocol.md
-└── environment.md
+├── DLBCL_MIL_RESULT.md
+└── .gitignore
 ```
 
-## 2. 模块职责
+## Module responsibilities
 
-| 模块 | 职责 |
-|------|------|
-| `base_dataset.py` | 定义所有Dataset子类必须实现的抽象接口和统一返回格式 |
-| `breakhis_dataset.py` | 读取BreaKHis CSV和40×图像，返回标准样本字典 |
-| `dlbcl_dataset.py` | 读取DLBCL CSV和图像patches，实现patient-level聚合逻辑 |
-| `classifier.py` | 封装EfficientNet-B2，支持二分类fine-tune和特征提取 |
-| `gradcam.py` | 对指定图像运行GradCAM，输出热力图叠加PNG |
-| `train.py` | 读取YAML配置，执行带AMP的训练循环，记录到W&B |
-| `evaluate.py` | 加载模型checkpoint，输出Accuracy/AUC/F1/混淆矩阵JSON |
-| `augmentations.py` | 统一定义train/val两套transform，两个dataset共用 |
-| `logger.py` | 封装W&B init/log/finish，隔离外部依赖 |
-| `configs/*.yaml` | 存储超参数，实验员（C/D）直接修改此处，不动代码 |
+| Module | Responsibility |
+|---|---|
+| `datasets/base_dataset.py` | Abstract base class fixing the sample dict returned by every patch dataset (`image`, `label`, `patient_id`, `meta`). |
+| `datasets/breakhis_dataset.py` | Reads the BreaKHis CSV, keeps 40x rows only, returns standardised image samples. |
+| `datasets/dlbcl_dataset.py` | Reads the DLBCL CSV, filters out rows whose image file is missing, returns patch samples, and exposes patient-to-index lookups. |
+| `datasets/dlbcl_bag_dataset.py` | Wraps the DLBCL patch dataset and emits one bag of sampled patches per patient for MIL (random sampling in train, deterministic in eval). |
+| `models/classifier.py` | Builds an EfficientNet-B2 (via timm) with a fresh linear head; loads ImageNet weights from the torch hub cache. |
+| `models/gradcam.py` | Runs Grad-CAM on a single image using the last EfficientNet-B2 block and writes an overlay PNG. |
+| `models/mil.py` | EfficientNet-B2 backbone plus a gated-attention pooling head; produces a bag-level logit and the per-instance attention weights. |
+| `training/train.py` | Patch-level training loop for BreaKHis and the DLBCL baseline; AMP, cosine schedule, checkpointing, optional patient-level validation AUC. |
+| `training/train_mil.py` | Bag-level ABMIL training loop; selects on validation patient AUC, evaluates the best checkpoint on the test split, and appends results to `DLBCL_MIL_RESULT.md`. |
+| `training/evaluate.py` | Loads a checkpoint, runs inference on a split, computes image-level or patient-level metrics, and writes a JSON result. |
+| `utils/augmentations.py` | Train/val transform pipelines (albumentations); separate profiles for BreaKHis and the stronger H&E-safe DLBCL augmentation. |
+| `utils/logger.py` | Thin wrapper around Weights & Biases init/log/finish, run directory under `artifacts/wandb/`. |
+| `utils/patient_aggregation.py` | Aggregates patch probabilities into a patient score (max / mean / top-k mean / percentile) and computes patient-level metrics. |
+| `configs/*.yaml` | Hyper-parameters and data paths; edited instead of code to change an experiment. |
+| `scripts/build_survival_split.py` | Builds the DLBCL survival split from the clinical CSV with patient-level separation (seed=42). |
 
-## 3. 状态存储位置
+## Configurations
 
-| 数据 | 存储位置 |
-|------|----------|
-| 原始图像 | 本地文件系统 `data/` |
-| train/test split | `data/splits/*.csv`（git托管） |
-| 模型权重（checkpoint） | `results/checkpoints/*.pth`（本地，不入git） |
-| 训练曲线、指标 | W&B云端dashboard |
-| 评估结果 | `results/{dataset}_eval.json` |
-| GradCAM输出图 | `results/gradcam/*.png` |
-| 运行时batch tensor | GPU显存（临时，训练结束释放） |
-| 预训练权重 | `~/.cache/torch/hub/`（timm自动缓存） |
+| Config | Purpose |
+|---|---|
+| `configs/breakhis.yaml` | BreaKHis 40x patch-level training. |
+| `configs/dlbcl.yaml` | DLBCL patch-level baseline; selects on patient-level AUC via max aggregation. |
+| `configs/dlbcl_mil.yaml` | DLBCL end-to-end ABMIL; bag size, attention hidden width, and dropout. |
 
-## 4. 模块调用关系
+## Data splits
 
-```mermaid
-graph TD
-    CSV[data/splits/*.csv] --> BD[breakhis_dataset.py]
-    CSV --> DD[dlbcl_dataset.py]
-    BASE[base_dataset.py] --> BD
-    BASE --> DD
-    AUG[augmentations.py] --> BD
-    AUG --> DD
+Split CSV files live in `data/splits/` and are tracked in git; the image data is
+not. The DLBCL survival split holds 71 train / 15 validation / 16 test patients
+(11,334 / 2,668 / 3,072 patches), produced by `scripts/build_survival_split.py`
+with patient-level separation so no patient appears in more than one split.
 
-    BD --> TRAIN[train.py]
-    DD --> TRAIN
-    CLS[classifier.py] --> TRAIN
-    LOG[logger.py] --> TRAIN
-    YAML[configs/*.yaml] --> TRAIN
+## State and outputs
 
-    TRAIN --> CKPT[(results/checkpoints/*.pth)]
-    CKPT --> EVAL[evaluate.py]
-    CKPT --> GCAM[gradcam.py]
+| Item | Location |
+|---|---|
+| Raw images | local filesystem under `data/` (not tracked in git) |
+| Split CSVs | `data/splits/*.csv` (tracked in git) |
+| Model checkpoints | `artifacts/results/checkpoints/*.pth` (not tracked in git) |
+| Evaluation JSON | `artifacts/results/*_eval.json` |
+| ABMIL test results | `DLBCL_MIL_RESULT.md` (appended by `train_mil.py`) |
+| Training logs / metrics | Weights & Biases (offline runs under `artifacts/wandb/`) |
+| Pretrained weights | torch hub cache (`~/.cache/torch/hub/checkpoints/`) |
 
-    EVAL --> JSON[(results/*_eval.json)]
-    GCAM --> PNG[(results/gradcam/*.png)]
-    TRAIN --> WB[W&B Dashboard]
-    EVAL --> WB
+## Data flow
+
+```
+                 build_survival_split.py
+                          │
+                          ▼
+   data/splits/*.csv ──► datasets ──► models ──► training ──► checkpoints
+                          │              │           │
+                   augmentations    classifier    train.py ──► evaluate.py ──► *_eval.json
+                                     mil (ABMIL)   train_mil.py ──► DLBCL_MIL_RESULT.md
+                                     gradcam
 ```
 
-## 5. 关键设计决策
+Patch-level training (`train.py`) consumes `breakhis_dataset` or `dlbcl_dataset`
+and the `classifier` model; for DLBCL it reports a patient-level AUC through
+`patient_aggregation`. Bag-level training (`train_mil.py`) consumes
+`dlbcl_bag_dataset` and the `mil` model and reports metrics directly at the
+patient level.
 
-| 决策 | 选择 | 理由 |
-|------|------|------|
-| 分类backbone | EfficientNet-B2（timm） | 8GB显存下B2是精度/显存最优点；B4+ OOM风险高 |
-| 放大倍数 | 仅40× | 单倍数数据量可控，单epoch < 5min；多倍数ensemble超出时间约束 |
-| 分割策略 | GradCAM弱监督 | BreaKHis无pixel-level mask，有监督分割无法训练；GradCAM合法且可量化展示 |
-| 训练精度 | AMP混合精度 | FP16将有效batch size翻倍，不牺牲收敛精度 |
-| 配置管理 | YAML文件 | 实验员（C/D）可直接修改超参数，无需改代码，防止代码污染 |
-| 实验追踪 | W&B | 6人共享dashboard，免运维，优于本地MLflow |
-| DLBCL聚合 | patient-level max pooling | 同一患者的patches取预测概率最大值，简单有效，优于mean（对异质性patch更敏感） |
+## Design notes
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Backbone | EfficientNet-B2 (timm) | Good accuracy-to-memory trade-off for an 8 GB GPU; larger variants risk OOM. |
+| BreaKHis magnification | 40x only | Single magnification keeps data volume and epoch time manageable. |
+| Mixed precision | AMP enabled | Larger effective batch size without loss of convergence. |
+| DLBCL patient score | Patch-probability aggregation (max default) | Simple, no extra parameters; max is sensitive to focal positive patches. |
+| DLBCL end-to-end model | Gated-attention MIL | Learns which patches matter for the patient label instead of fixing the aggregation rule. |
+| Configuration | YAML files | Hyper-parameters change without touching code. |
+| Experiment tracking | Weights & Biases (offline) | Local run capture without requiring network access. |

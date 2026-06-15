@@ -17,9 +17,7 @@ import albumentations as A
 
 from src.utils.augmentations import get_transforms
 
-# ---------------------------------------------------------------------------
 # UT-01 to UT-04: augmentations.py
-# ---------------------------------------------------------------------------
 
 
 class TestGetTransforms:
@@ -69,9 +67,7 @@ class TestGetTransforms:
         assert tensor.max().item() <= 3.0, f"Max value {tensor.max().item()} is above 3"
 
 
-# ---------------------------------------------------------------------------
 # UT-05 to UT-07: logger.py
-# ---------------------------------------------------------------------------
 
 
 class TestWandbLogger:
@@ -122,9 +118,7 @@ class TestWandbLogger:
         logger.finish()
 
 
-# ---------------------------------------------------------------------------
 # UT-08 to UT-09: base_dataset.py
-# ---------------------------------------------------------------------------
 
 
 class TestBaseDataset:

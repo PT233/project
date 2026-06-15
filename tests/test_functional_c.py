@@ -22,18 +22,14 @@ import yaml
 from PIL import Image
 from torch.utils.data import DataLoader
 
-# ---------------------------------------------------------------------------
 # Project root on sys.path
-# ---------------------------------------------------------------------------
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 PYTHON = sys.executable  # python inside conda env
 
-# ---------------------------------------------------------------------------
 # Shared helpers
-# ---------------------------------------------------------------------------
 
 def make_fake_image(path: str, size=(224, 224)):
     arr = np.random.randint(0, 256, (*size, 3), dtype=np.uint8)
@@ -103,9 +99,7 @@ def make_fake_config(config_path: str, data_root: str, split_dir: str,
     return cfg
 
 
-# ---------------------------------------------------------------------------
 # Shared fixture: fake training environment (reused by FT-06 to FT-12)
-# ---------------------------------------------------------------------------
 
 # We use a module-scoped fixture so the expensive train run happens once.
 _TRAIN_ENV = {}  # populated by ft06_result fixture
@@ -203,9 +197,7 @@ def ft06_result(fake_train_env):
     }
 
 
-# ===========================================================================
 # FT-01: breakhis_dataset.py __main__ prints shape: torch.Size([3, 224, 224])
-# ===========================================================================
 
 def test_ft01_breakhis_stdout_shape():
     """FT-01: Running breakhis_dataset.py prints expected shape."""
@@ -227,9 +219,7 @@ def test_ft01_breakhis_stdout_shape():
     )
 
 
-# ===========================================================================
 # FT-02: CSV with non-existent filepath → exit code 2
-# ===========================================================================
 
 def test_ft02_breakhis_missing_image_exit2():
     """FT-02: Dataset with missing image file exits with code 2."""
@@ -267,9 +257,7 @@ _ = ds[0]
         )
 
 
-# ===========================================================================
 # FT-03: DataLoader batch has non-empty patient_id strings
-# ===========================================================================
 
 def test_ft03_breakhis_dataloader_patient_id():
     """FT-03: DataLoader batch contains non-empty patient_id strings."""
@@ -299,9 +287,7 @@ def test_ft03_breakhis_dataloader_patient_id():
             )
 
 
-# ===========================================================================
 # FT-04: dlbcl_dataset.py __main__ prints shape and label
-# ===========================================================================
 
 def test_ft04_dlbcl_stdout():
     """FT-04: Running dlbcl_dataset.py prints shape and label."""
@@ -327,9 +313,7 @@ def test_ft04_dlbcl_stdout():
     )
 
 
-# ===========================================================================
 # FT-05: DLBCLDataset patient counts and get_patient_ids()
-# ===========================================================================
 
 def test_ft05_dlbcl_patient_ids():
     """FT-05: DLBCLDataset get_patient_ids() returns list; each has >= 1 sample."""
@@ -358,9 +342,7 @@ def test_ft05_dlbcl_patient_ids():
             )
 
 
-# ===========================================================================
 # FT-06: train.py exits 0 with fake data (epochs=1)
-# ===========================================================================
 
 def test_ft06_train_exits_zero(ft06_result):
     """FT-06: train.py with fake data (epochs=1) exits with code 0."""
@@ -372,9 +354,7 @@ def test_ft06_train_exits_zero(ft06_result):
     )
 
 
-# ===========================================================================
 # FT-07: last.pth exists and is loadable
-# ===========================================================================
 
 def test_ft07_checkpoint_exists(ft06_result):
     """FT-07: After training, last.pth exists and torch.load succeeds."""
@@ -391,9 +371,7 @@ def test_ft07_checkpoint_exists(ft06_result):
     assert not missing, f"Checkpoint missing keys: {missing}"
 
 
-# ===========================================================================
 # FT-08: non-existent config → exit code 1
-# ===========================================================================
 
 def test_ft08_missing_config_exit1():
     """FT-08: train.py with non-existent config exits with code 1."""
@@ -411,9 +389,7 @@ def test_ft08_missing_config_exit1():
     )
 
 
-# ===========================================================================
 # FT-09: --resume continues from saved checkpoint (epoch field >= 1)
-# ===========================================================================
 
 def test_ft09_resume_checkpoint(ft06_result, fake_train_env):
     """FT-09: Resuming from last.pth with epochs=2 produces epoch >= 1 in ckpt."""
@@ -460,9 +436,7 @@ def test_ft09_resume_checkpoint(ft06_result, fake_train_env):
         )
 
 
-# ===========================================================================
 # FT-10: evaluate.py exits 0, JSON output exists
-# ===========================================================================
 
 @pytest.fixture(scope="module")
 def ft10_result(ft06_result, fake_train_env):
@@ -534,9 +508,7 @@ def test_ft10_evaluate_exits_zero(ft10_result):
     )
 
 
-# ===========================================================================
 # FT-11: JSON contains required metrics with 3-decimal-place floats
-# ===========================================================================
 
 def test_ft11_json_metrics(ft10_result):
     """FT-11: JSON has accuracy/auc/f1/confusion_matrix; floats rounded to 3 dp."""
@@ -564,9 +536,7 @@ def test_ft11_json_metrics(ft10_result):
         )
 
 
-# ===========================================================================
 # FT-12: JSON timestamp matches ISO 8601 format
-# ===========================================================================
 
 def test_ft12_json_timestamp(ft10_result):
     """FT-12: JSON timestamp field matches ^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$."""

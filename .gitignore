@@ -1,46 +1,37 @@
-# Secrets and environment
 .env
-
-# Data directories (download locally, do not commit)
+.claude/
 data/breakhis/
 data/dlbcl/
-
-# Results (generated locally, do not commit)
 results/
 
-# Python cache
 __pycache__/
 *.py[cod]
 *$py.class
 *.pyc
 
-# Model weights
 *.pth
 *.pt
 
-# Orchestrator logs
 .orchestrator_logs/
-
-# Jupyter Notebook checkpoints
 .ipynb_checkpoints/
 
-# OS-specific
 .DS_Store
 Thumbs.db
-
-# IDEs
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Distribution / packaging
 *.egg-info/
 dist/
 build/
 
-# Virtual environments
 venv/
 env/
 .conda/
 wandb/
+artifacts/
+*.log
+data/
+.agents/
+logs/

@@ -2,7 +2,7 @@
 # prepare_data.sh — Download datasets and generate CSV splits
 #
 # Usage:
-#   bash prepare_data.sh [--skip-download]   # skip if already downloaded
+#   bash scripts/prepare_data.sh [--skip-download]   # skip if already downloaded
 #
 # After completion:
 #   data/breakhis/  — BreaKHis images (40x only used)
@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 BREAKHIS_URL="https://nextcloud.univ-lille.fr/index.php/s/TXHR4qjo6PFamJC/download"
@@ -25,7 +25,7 @@ done
 
 mkdir -p data/breakhis data/dlbcl data/splits
 
-# ── 1. Download ─────────────────────────────────────────────────────────────
+# ── 1. Download  
 if [[ $SKIP_DOWNLOAD -eq 0 ]]; then
   echo "[1/3] Downloading BreaKHis..."
   wget -q --show-progress -O /tmp/breakhis.zip "$BREAKHIS_URL"
@@ -48,17 +48,17 @@ else
   echo "[skip] Download skipped (--skip-download)"
 fi
 
-# ── 2. Inspect downloaded splits ─────────────────────────────────────────────
+# ── 2. Inspect downloaded splits 
 echo ""
-echo "=== data/splits/ contents ==="
+echo " ' data/splits/ contents  '"
 ls -lh data/splits/
 
-# ── 3. Normalise CSV names to what train.py expects ─────────────────────────
+# ── 3. Normalise CSV names to what train.py expects 
 # train.py  expects: data/splits/train.csv, data/splits/val.csv
 # evaluate.py checks: {dataset}_test.csv → {dataset}_val.csv → test.csv → val.csv
 # Strategy: if provider gives breakhis_train.csv etc, create symlinks to train.csv
 echo ""
-echo "=== Normalising CSV filenames ==="
+echo " ' Normalising CSV filenames  '"
 cd data/splits/
 
 normalize_csv() {
@@ -88,10 +88,10 @@ done
 
 cd "$PROJECT_ROOT"
 
-# ── 4. Quick sanity check ────────────────────────────────────────────────────
+# ── 4. Quick sanity check  
 echo ""
-echo "=== Sanity check ==="
-conda run -n ai_dt python - <<'PYEOF'
+echo " ' Sanity check  '"
+conda run -n cancer-histo python - <<'PYEOF'
 import sys, os
 sys.path.insert(0, os.getcwd())
 from src.datasets.breakhis_dataset import BreaKHisDataset
@@ -114,5 +114,5 @@ else:
 PYEOF
 
 echo ""
-echo "=== prepare_data.sh complete ==="
-echo "Next: bash run_training.sh"
+echo " ' prepare_data.sh complete  '"
+echo "Next: bash scripts/run_training.sh"

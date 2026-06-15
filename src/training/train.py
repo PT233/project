@@ -2,7 +2,7 @@
 train.py — Generic training loop with AMP support.
 
 Usage:
-    python src/training/train.py --config configs/breakhis.yaml [--resume results/checkpoints/last.pth]
+    python src/training/train.py --config configs/breakhis.yaml [--resume artifacts/results/checkpoints/last.pth]
 
 Exit codes:
     0 — success
@@ -30,12 +30,12 @@ import yaml
 from sklearn.metrics import roc_auc_score
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
-# ---------------------------------------------------------------------------
+from src.utils.patient_aggregation import compute_patient_aggregation_report
+
 # Logging setup — format: [LEVEL][module] message
-# ---------------------------------------------------------------------------
 _log = logging.getLogger("train")
 _handler = logging.StreamHandler(sys.stderr)
 _handler.setFormatter(logging.Formatter("[%(levelname)s][%(name)s] %(message)s"))
@@ -44,9 +44,7 @@ _log.setLevel(logging.INFO)
 _log.propagate = False
 
 
-# ---------------------------------------------------------------------------
 # Config loading
-# ---------------------------------------------------------------------------
 
 REQUIRED_FIELDS = [
     "dataset", "data_root", "split_dir", "model", "pretrained",
@@ -89,9 +87,17 @@ def load_config(config_path: str) -> dict:
     return config
 
 
-# ---------------------------------------------------------------------------
 # Dataset factory
-# ---------------------------------------------------------------------------
+
+def _split_filename(config: dict, split: str, default_name: str) -> str:
+    split_files = config.get("split_files", {})
+    if split_files is None:
+        split_files = {}
+    if not isinstance(split_files, dict):
+        _log.error("split_files must be a mapping, got: %r", split_files)
+        sys.exit(1)
+    return str(split_files.get(split, default_name))
+
 
 def build_datasets(config: dict):
     """Instantiate train and val datasets based on config['dataset'].
@@ -111,8 +117,8 @@ def build_datasets(config: dict):
         sys.exit(2)
 
     if dataset_name == "breakhis":
-        train_csv = os.path.join(split_dir, "train.csv")
-        val_csv = os.path.join(split_dir, "val.csv")
+        train_csv = os.path.join(split_dir, _split_filename(config, "train", "train.csv"))
+        val_csv = os.path.join(split_dir, _split_filename(config, "val", "val.csv"))
         if not os.path.exists(train_csv):
             _log.error("Train CSV not found: %s", train_csv)
             sys.exit(2)
@@ -127,8 +133,14 @@ def build_datasets(config: dict):
         val_ds = BreaKHisDataset(csv_path=val_csv, data_root=data_root, mode="val")
 
     elif dataset_name == "dlbcl":
-        train_csv = os.path.join(split_dir, "dlbcl_train.csv")
-        val_csv = os.path.join(split_dir, "dlbcl_val.csv")
+        train_csv = os.path.join(
+            split_dir,
+            _split_filename(config, "train", "dlbcl_train.csv"),
+        )
+        val_csv = os.path.join(
+            split_dir,
+            _split_filename(config, "val", "dlbcl_val.csv"),
+        )
         if not os.path.exists(train_csv):
             _log.error("Train CSV not found: %s", train_csv)
             sys.exit(2)
@@ -137,8 +149,22 @@ def build_datasets(config: dict):
             sys.exit(2)
 
         from src.datasets.dlbcl_dataset import DLBCLDataset
-        train_ds = DLBCLDataset(csv_path=train_csv, data_root=data_root, mode="train")
-        val_ds = DLBCLDataset(csv_path=val_csv, data_root=data_root, mode="val")
+        stain_normalization = bool(config.get("stain_normalization", False))
+        stain_reference_path = str(config.get("stain_reference_path", "data/stain_reference.png"))
+        train_ds = DLBCLDataset(
+            csv_path=train_csv,
+            data_root=data_root,
+            mode="train",
+            stain_normalization=stain_normalization,
+            stain_reference_path=stain_reference_path,
+        )
+        val_ds = DLBCLDataset(
+            csv_path=val_csv,
+            data_root=data_root,
+            mode="val",
+            stain_normalization=stain_normalization,
+            stain_reference_path=stain_reference_path,
+        )
 
     else:
         # Already validated above, but guard anyway
@@ -148,9 +174,21 @@ def build_datasets(config: dict):
     return train_ds, val_ds
 
 
-# ---------------------------------------------------------------------------
+def _build_patient_balanced_sampler(dataset) -> WeightedRandomSampler:
+    """Weight patches inversely by their patient's patch count."""
+    patient_counts: dict[str, int] = {}
+    patient_ids = [str(pid) for pid in dataset.df["patient_id"].tolist()]
+    for pid in patient_ids:
+        patient_counts[pid] = patient_counts.get(pid, 0) + 1
+
+    weights = torch.as_tensor(
+        [1.0 / patient_counts[pid] for pid in patient_ids],
+        dtype=torch.double,
+    )
+    return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+
+
 # One-epoch helpers
-# ---------------------------------------------------------------------------
 
 def train_one_epoch(
     model: nn.Module,
@@ -197,6 +235,50 @@ def train_one_epoch(
     return running_loss / max(n_batches, 1)
 
 
+def _safe_auc(labels: list[int], probs: list[float], scope: str) -> float:
+    """Compute AUC with a deterministic fallback for single-class inputs."""
+    unique_labels = set(labels)
+    if len(unique_labels) < 2:
+        _log.warning(
+            "%s contains only one class (%s); AUC set to 0.0",
+            scope,
+            unique_labels,
+        )
+        return 0.0
+    return float(roc_auc_score(labels, probs))
+
+
+def _patient_level_auc(
+    labels: list[int],
+    probs: list[float],
+    patient_ids: list[str],
+    aggregation: str = "max",
+    top_k: int = 10,
+    percentile: float = 95.0,
+) -> float:
+    """Aggregate patch probabilities by patient, then return selected AUC."""
+    report = compute_patient_aggregation_report(
+        probs=probs,
+        labels=labels,
+        patient_ids=patient_ids,
+        selected_method=aggregation,
+        top_k=top_k,
+        percentile=percentile,
+        round_digits=None,
+        include_patients=False,
+    )
+    return float(report["metrics_by_method"][report["selected"]]["auc"])
+
+
+def _patient_level_max_auc(
+    labels: list[int],
+    probs: list[float],
+    patient_ids: list[str],
+) -> float:
+    """Backward-compatible max-pooling patient AUC helper."""
+    return _patient_level_auc(labels, probs, patient_ids, aggregation="max")
+
+
 @torch.no_grad()
 def validate(
     model: nn.Module,
@@ -204,19 +286,24 @@ def validate(
     criterion: nn.Module,
     device: torch.device,
     amp_enabled: bool,
+    dataset_name: str,
+    patient_aggregation: str = "max",
+    patient_top_k: int = 10,
+    patient_percentile: float = 95.0,
 ) -> tuple:
     """Run validation.
 
     Returns
     -------
-    tuple[float, float]
-        (mean_val_loss, val_auc)
+    tuple[float, float, float, float | None, dict | None]
+        (mean_val_loss, selection_auc, patch_auc, patient_auc, patient_report)
     """
     model.eval()
     running_loss = 0.0
     n_batches = 0
     all_labels = []
     all_probs = []
+    all_patient_ids = []
 
     for batch in tqdm(loader, desc="val  ", leave=False):
         images = batch["image"].to(device, non_blocking=True)
@@ -236,28 +323,34 @@ def validate(
         probs = torch.softmax(logits, dim=1)[:, 1]  # P(malignant / low-survival)
         all_labels.extend(labels.cpu().tolist())
         all_probs.extend(probs.cpu().tolist())
+        if dataset_name == "dlbcl":
+            all_patient_ids.extend(str(pid) for pid in batch["patient_id"])
 
     mean_loss = running_loss / max(n_batches, 1)
 
-    # Compute AUC; guard against edge cases (single class in val set)
-    unique_labels = set(all_labels)
-    if len(unique_labels) < 2:
-        _log.warning(
-            "Validation set contains only one class (%s); AUC set to 0.0",
-            unique_labels,
+    patch_auc = _safe_auc(all_labels, all_probs, "Patch-level validation set")
+    patient_auc = None
+    patient_report = None
+    if dataset_name == "dlbcl":
+        patient_report = compute_patient_aggregation_report(
+            probs=all_probs,
+            labels=all_labels,
+            patient_ids=all_patient_ids,
+            selected_method=patient_aggregation,
+            top_k=patient_top_k,
+            percentile=patient_percentile,
+            round_digits=None,
+            include_patients=False,
         )
-        auc = 0.0
-    else:
-        auc = roc_auc_score(all_labels, all_probs)
+        patient_auc = float(patient_report["metrics_by_method"][patient_aggregation]["auc"])
+    selection_auc = patient_auc if patient_auc is not None else patch_auc
 
-    return mean_loss, auc
+    return mean_loss, selection_auc, patch_auc, patient_auc, patient_report
 
 
-# ---------------------------------------------------------------------------
 # Checkpoint helpers
-# ---------------------------------------------------------------------------
 
-CKPT_DIR = "results/checkpoints"
+CKPT_DIR = os.environ.get("CANCER_HISTO_CKPT_DIR", "artifacts/results/checkpoints")
 
 
 def save_checkpoint(state: dict, path: str) -> None:
@@ -288,21 +381,16 @@ def load_checkpoint(path: str, model: nn.Module, optimizer: AdamW) -> dict:
     return ckpt
 
 
-# ---------------------------------------------------------------------------
-# W&B logger (optional — failures are non-fatal)
-# ---------------------------------------------------------------------------
+# W&B logger (credential failures are fatal)
 
 def _init_wandb_logger(config: dict):
-    """Try to initialise WandbLogger; return None on failure."""
+    """Initialise WandbLogger; return None only for non-exit failures."""
     try:
         from src.utils.logger import WandbLogger
         wandb_cfg = config.get("wandb", {})
         project = wandb_cfg.get("project", f"cancer-histo-{config['dataset']}")
         logger = WandbLogger(config=config, project=project)
         return logger
-    except SystemExit:
-        _log.warning("W&B init failed (likely missing WANDB_API_KEY); continuing without logging.")
-        return None
     except Exception as exc:  # noqa: BLE001
         _log.warning("W&B init failed: %s; continuing without logging.", exc)
         return None
@@ -328,9 +416,7 @@ def _finish_wandb(logger) -> None:
         _log.warning("W&B finish failed: %s", exc)
 
 
-# ---------------------------------------------------------------------------
 # Main training entry point
-# ---------------------------------------------------------------------------
 
 def train(config_path: str, resume_path: str | None = None) -> None:
     """Full training loop.
@@ -355,11 +441,20 @@ def train(config_path: str, resume_path: str | None = None) -> None:
     train_ds, val_ds = build_datasets(config)
     _log.info("Train samples: %d, Val samples: %d", len(train_ds), len(val_ds))
 
-    num_workers = min(4, os.cpu_count() or 1)
+    num_workers = int(config.get("num_workers", min(4, os.cpu_count() or 1)))
+    patient_balanced_sampling = (
+        config["dataset"] == "dlbcl"
+        and bool(config.get("patient_balanced_sampling", False))
+    )
+    train_sampler = _build_patient_balanced_sampler(train_ds) if patient_balanced_sampling else None
+    if patient_balanced_sampling:
+        _log.info("DLBCL patient-balanced sampler enabled")
+
     train_loader = DataLoader(
         train_ds,
         batch_size=config["batch_size"],
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=(device.type == "cuda"),
         drop_last=True,
@@ -390,7 +485,9 @@ def train(config_path: str, resume_path: str | None = None) -> None:
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
 
     # ── Loss ────────────────────────────────────────────────────────────────
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(
+        label_smoothing=float(config.get("label_smoothing", 0.0))
+    )
 
     # ── AMP scaler ──────────────────────────────────────────────────────────
     scaler = torch.amp.GradScaler("cuda") if amp_enabled else None
@@ -412,7 +509,21 @@ def train(config_path: str, resume_path: str | None = None) -> None:
 
     # ── Training loop ────────────────────────────────────────────────────────
     dataset_name = config["dataset"]
-    # DLBCL uses best_dlbcl.pth per task.md #013 DoD; BreaKHis uses best.pth
+    patient_aggregation = str(config.get("patient_aggregation", "max")).strip().lower()
+    patient_top_k = int(config.get("patient_top_k", 10))
+    patient_percentile = float(config.get("patient_percentile", 95.0))
+    early_stop_patience = int(config.get("early_stop_patience", 0))
+    epochs_without_improvement = 0
+    if dataset_name == "dlbcl":
+        _log.info(
+            "DLBCL patient aggregation: method=%s top_k=%d percentile=%.1f",
+            patient_aggregation,
+            patient_top_k,
+            patient_percentile,
+        )
+    if early_stop_patience > 0:
+        _log.info("Early stopping enabled: patience=%d", early_stop_patience)
+    # DLBCL uses best_dlbcl.pth per task.md #013 spec; BreaKHis uses best.pth
     # config["checkpoint_name"] overrides the default if present
     if config.get("checkpoint_name"):
         best_ckpt_name = config["checkpoint_name"]
@@ -441,7 +552,17 @@ def train(config_path: str, resume_path: str | None = None) -> None:
             scheduler.step()
 
             try:
-                val_loss, val_auc = validate(model, val_loader, criterion, device, amp_enabled)
+                val_loss, val_auc, val_patch_auc, val_patient_auc, val_patient_report = validate(
+                    model,
+                    val_loader,
+                    criterion,
+                    device,
+                    amp_enabled,
+                    dataset_name,
+                    patient_aggregation=patient_aggregation,
+                    patient_top_k=patient_top_k,
+                    patient_percentile=patient_percentile,
+                )
             except RuntimeError as exc:
                 if "out of memory" in str(exc).lower():
                     _log.error(
@@ -451,23 +572,50 @@ def train(config_path: str, resume_path: str | None = None) -> None:
                     sys.exit(3)
                 raise
 
-            _log.info(
-                "  train_loss=%.4f  val_loss=%.4f  val_auc=%.4f  (best_auc=%.4f)",
-                train_loss, val_loss, val_auc, best_auc,
-            )
+            if val_patient_auc is None:
+                _log.info(
+                    "  train_loss=%.4f  val_loss=%.4f  val_auc=%.4f  (best_auc=%.4f)",
+                    train_loss, val_loss, val_auc, best_auc,
+                )
+            else:
+                patient_metrics = val_patient_report["metrics_by_method"]
+                _log.info(
+                    "  train_loss=%.4f  val_loss=%.4f  "
+                    "val_patch_auc=%.4f  val_patient_%s_auc=%.4f  "
+                    "patient_auc[max=%.4f mean=%.4f topk=%.4f pctl=%.4f]  (best_auc=%.4f)",
+                    train_loss,
+                    val_loss,
+                    val_patch_auc,
+                    patient_aggregation,
+                    val_patient_auc,
+                    patient_metrics["max"]["auc"],
+                    patient_metrics["mean"]["auc"],
+                    patient_metrics["topk_mean"]["auc"],
+                    patient_metrics["percentile"]["auc"],
+                    best_auc,
+                )
 
             # ── W&B logging ─────────────────────────────────────────────────
-            _log_wandb(wb_logger, {
+            metrics = {
                 "epoch": epoch + 1,
                 "train_loss": train_loss,
                 "val_loss": val_loss,
                 "val_auc": val_auc,
-            })
+                "val_patch_auc": val_patch_auc,
+            }
+            if val_patient_auc is not None:
+                metrics["val_patient_auc"] = val_patient_auc
+                for method, method_metrics in val_patient_report["metrics_by_method"].items():
+                    metrics[f"val_patient_{method}_auc"] = method_metrics["auc"]
+            _log_wandb(wb_logger, metrics)
 
             # ── Update best AUC before saving checkpoints ────────────────────
             is_best = val_auc > best_auc
             if is_best:
                 best_auc = val_auc
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
 
             # ── Checkpoint state ────────────────────────────────────────────
             ckpt_state: dict = {
@@ -475,6 +623,15 @@ def train(config_path: str, resume_path: str | None = None) -> None:
                 "model_state": OrderedDict(model.state_dict()),
                 "optim_state": OrderedDict(optimizer.state_dict()),
                 "best_auc": best_auc,   # always reflects the running best
+                "selection_metric": "patient_auc" if val_patient_auc is not None else "patch_auc",
+                "patient_aggregation": patient_aggregation if val_patient_auc is not None else None,
+                "patient_top_k": patient_top_k if val_patient_auc is not None else None,
+                "patient_percentile": patient_percentile if val_patient_auc is not None else None,
+                "val_patient_metrics_by_method": (
+                    val_patient_report["metrics_by_method"] if val_patient_report is not None else None
+                ),
+                "val_patch_auc": val_patch_auc,
+                "val_patient_auc": val_patient_auc,
                 "config": config,
             }
 
@@ -484,7 +641,22 @@ def train(config_path: str, resume_path: str | None = None) -> None:
             # Save best checkpoint when val AUC improves
             if is_best:
                 save_checkpoint(ckpt_state, best_ckpt_path)
-                _log.info("  New best AUC=%.4f — saved %s", best_auc, best_ckpt_path)
+                _log.info(
+                    "  New best %s=%.4f — saved %s",
+                    ckpt_state["selection_metric"],
+                    best_auc,
+                    best_ckpt_path,
+                )
+            elif (
+                early_stop_patience > 0
+                and epochs_without_improvement >= early_stop_patience
+            ):
+                _log.info(
+                    "Early stopping at epoch %d: no val AUC improvement for %d epoch(s)",
+                    epoch + 1,
+                    epochs_without_improvement,
+                )
+                break
 
     finally:
         _finish_wandb(wb_logger)
@@ -492,9 +664,7 @@ def train(config_path: str, resume_path: str | None = None) -> None:
     _log.info("Training complete. Best val AUC: %.4f", best_auc)
 
 
-# ---------------------------------------------------------------------------
 # CLI entry point
-# ---------------------------------------------------------------------------
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
@@ -515,116 +685,6 @@ def _parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def _dod_selftest() -> None:
-    """DoD __main__ verification.
-
-    Runs a single epoch with fake data (batch_size=4, epochs=1) to confirm
-    the training loop works end-to-end and last.pth is saved correctly.
-    This function mutates the module-level CKPT_DIR temporarily.
-    """
-    import csv
-    import shutil
-    import tempfile
-
-    import numpy as np
-    from PIL import Image
-
-    global CKPT_DIR  # noqa: PLW0603
-
-    logging.basicConfig(level=logging.INFO)
-    print("=== DoD __main__ verification ===")
-
-    # ── Build a minimal temporary environment ──────────────────────────────
-    tmpdir = tempfile.mkdtemp(prefix="train_dod_")
-    data_root = os.path.join(tmpdir, "images")
-    split_dir = os.path.join(tmpdir, "splits")
-    ckpt_dir = os.path.join(tmpdir, "checkpoints")
-    os.makedirs(data_root, exist_ok=True)
-    os.makedirs(split_dir, exist_ok=True)
-    os.makedirs(ckpt_dir, exist_ok=True)
-
-    # Generate 10 fake PNG images (5 benign + 5 malignant)
-    rows = []
-    for i in range(10):
-        label = i % 2
-        fname = f"fake_{i:02d}.png"
-        fpath = os.path.join(data_root, fname)
-        img = Image.fromarray(
-            np.random.randint(0, 256, (224, 224, 3), dtype=np.uint8)
-        )
-        img.save(fpath)
-        rows.append(
-            {
-                "filepath": fpath,
-                "label": label,
-                "patient_id": f"SOB_P{i:02d}",
-                "magnification": "40x",
-            }
-        )
-
-    # Write train and val CSV splits
-    fieldnames = ["filepath", "label", "patient_id", "magnification"]
-    for split_name, split_rows in [("train", rows[:8]), ("val", rows[8:])]:
-        csv_path = os.path.join(split_dir, f"{split_name}.csv")
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(split_rows)
-
-    # Minimal config (epochs=1, batch_size=4, no AMP, no W&B)
-    dod_config = {
-        "dataset": "breakhis",
-        "data_root": data_root,
-        "split_dir": split_dir,
-        "magnification": "40x",
-        "model": "efficientnet_b2",
-        "pretrained": False,       # avoid download during test
-        "num_classes": 2,
-        "batch_size": 4,
-        "lr": 1e-4,
-        "weight_decay": 1e-5,
-        "epochs": 1,
-        "amp": False,
-        "wandb": {"project": "test", "entity": "test"},
-    }
-    config_path = os.path.join(tmpdir, "dod_config.yaml")
-    with open(config_path, "w") as f:
-        yaml.safe_dump(dod_config, f)
-
-    # Temporarily redirect checkpoint save location to tmpdir
-    original_ckpt_dir = CKPT_DIR
-    CKPT_DIR = ckpt_dir
-
-    try:
-        train(config_path=config_path, resume_path=None)
-
-        # ── DoD ③: verify last.pth exists and has required fields ──────────
-        last_pth = os.path.join(ckpt_dir, "last.pth")
-        assert os.path.exists(last_pth), f"last.pth not found at {last_pth}"
-
-        ckpt = torch.load(last_pth, map_location="cpu")
-        required_keys = {"epoch", "model_state", "optim_state", "best_auc", "config"}
-        missing_keys = required_keys - set(ckpt.keys())
-        assert not missing_keys, f"last.pth missing keys: {missing_keys}"
-        assert isinstance(ckpt["epoch"], int), "epoch must be int"
-        assert isinstance(ckpt["best_auc"], float), "best_auc must be float"
-        assert isinstance(ckpt["config"], dict), "config must be dict"
-
-        print(f"DoD ③  last.pth exists and has keys: {set(ckpt.keys())}")
-        print(f"       epoch={ckpt['epoch']}, best_auc={ckpt['best_auc']:.4f}")
-        print("=== All DoD checks passed ===")
-
-    finally:
-        CKPT_DIR = original_ckpt_dir
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
 if __name__ == "__main__":
-    # If --config is provided, behave as the normal CLI training launcher.
-    # If run with no arguments (or only unrecognised flags), run the DoD
-    # self-test using temporary fake data.
-    if "--config" in sys.argv:
-        args = _parse_args()
-        train(config_path=args.config, resume_path=args.resume)
-    else:
-        _dod_selftest()
+    args = _parse_args()
+    train(config_path=args.config, resume_path=args.resume)

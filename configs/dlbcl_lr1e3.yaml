@@ -1,0 +1,28 @@
+dataset: dlbcl
+data_root: ""
+split_dir: data/splits/
+split_files:
+  train: dlbcl_survival_train.csv
+  val: dlbcl_survival_val.csv
+  test: dlbcl_survival_test.csv
+
+model: efficientnet_b2
+pretrained: true
+num_classes: 2
+
+batch_size: 16
+lr: 1.0e-3
+weight_decay: 5.0e-4
+epochs: 15
+amp: true
+num_workers: 0
+stain_normalization: true
+stain_reference_path: data/stain_reference.png
+label_smoothing: 0.1
+early_stop_patience: 5
+patient_aggregation: max
+checkpoint_name: best_dlbcl_lr1e3.pth
+
+wandb:
+  project: cancer-histo-dlbcl
+  entity: YOUR_WANDB_ENTITY

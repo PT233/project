@@ -1,0 +1,20 @@
+dataset: dlbcl
+data_root: ""
+split_dir: data/splits/
+
+model: efficientnet_b2
+pretrained: true
+num_classes: 2
+
+batch_size: 16
+lr: 1.0e-4
+weight_decay: 1.0e-5
+epochs: 3
+amp: true
+num_workers: 0
+
+checkpoint_name: debug_dlbcl.pth
+
+wandb:
+  project: cancer-histo-dlbcl
+  entity: YOUR_WANDB_ENTITY

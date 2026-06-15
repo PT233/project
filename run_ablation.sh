@@ -28,16 +28,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-CONDA="conda run -n ai_dt --no-capture-output python"
+CONDA="conda run -n base --no-capture-output python"
 RESULTS_DIR="results/checkpoints"
 mkdir -p "$RESULTS_DIR" results/
 
-# ── #017: BreaKHis augmentation ablation ─────────────────────────────────────
+# #017: BreaKHis augmentation ablation
 ablation_breakhis() {
   echo ""
-  echo "========================================"
   echo "  #017: BreaKHis Augmentation Ablation"
-  echo "========================================"
 
   # Run 1: WITH augmentation (standard config)
   echo "[1/2] Training WITH augmentation..."
@@ -70,7 +68,7 @@ tmp.close()
 print(f"No-aug config: {tmp.name}")
 
 ret = subprocess.run(
-    ["conda", "run", "-n", "ai_dt", "--no-capture-output",
+    ["conda", "run", "-n", "base", "--no-capture-output",
      "python", "src/training/train.py", "--config", tmp.name],
     check=False
 )
@@ -92,7 +90,7 @@ yaml.dump(cfg, tmp); tmp.close()
 
 import subprocess, sys
 ret = subprocess.run(
-    ["conda", "run", "-n", "ai_dt", "--no-capture-output",
+    ["conda", "run", "-n", "base", "--no-capture-output",
      "python", "src/training/evaluate.py",
      "--config", tmp.name,
      "--checkpoint", "results/checkpoints/best_breakhis_noaug.pth"],
@@ -125,12 +123,10 @@ print(json.dumps(result["runs"], indent=2))
 PYEOF
 }
 
-# ── #018: DLBCL learning-rate ablation ───────────────────────────────────────
+# #018: DLBCL learning-rate ablation
 ablation_dlbcl() {
   echo ""
-  echo "========================================"
   echo "  #018: DLBCL Learning-Rate Ablation"
-  echo "========================================"
 
   declare -A LR_AUCS
 
@@ -151,7 +147,7 @@ tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
 yaml.dump(cfg, tmp); tmp.close()
 
 ret = subprocess.run(
-    ["conda", "run", "-n", "ai_dt", "--no-capture-output",
+    ["conda", "run", "-n", "base", "--no-capture-output",
      "python", "src/training/train.py", "--config", tmp.name],
     check=False
 )
@@ -170,7 +166,7 @@ tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
 yaml.dump(cfg, tmp); tmp.close()
 
 ret = subprocess.run(
-    ["conda", "run", "-n", "ai_dt", "--no-capture-output",
+    ["conda", "run", "-n", "base", "--no-capture-output",
      "python", "src/training/evaluate.py",
      "--config", tmp.name,
      "--checkpoint", "$CKPT"],
@@ -209,7 +205,7 @@ print(json.dumps(result["runs"], indent=2))
 PYEOF
 }
 
-# ── Dispatch ──────────────────────────────────────────────────────────────────
+# Dispatch
 case "$STUDY" in
   both)
     ablation_breakhis
@@ -228,6 +224,6 @@ case "$STUDY" in
 esac
 
 echo ""
-echo "=== run_ablation.sh complete ==="
+echo " run_ablation.sh complete "
 echo "Outputs:"
 ls -lh results/ablation_*.json 2>/dev/null || true

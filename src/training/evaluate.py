@@ -4,7 +4,7 @@ evaluate.py — Model evaluation script.
 Loads a trained checkpoint and evaluates it on the test split.
 
 Usage:
-    python src/training/evaluate.py --config configs/breakhis.yaml --checkpoint results/checkpoints/best.pth
+    python src/training/evaluate.py --config configs/breakhis.yaml --checkpoint artifacts/results/checkpoints/best.pth
 
 Exit codes:
     0 — success
@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import sys
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,9 +31,9 @@ import yaml
 from sklearn.metrics import roc_auc_score, f1_score, confusion_matrix
 from torch.utils.data import DataLoader
 
-# ---------------------------------------------------------------------------
+from src.utils.patient_aggregation import compute_patient_aggregation_report
+
 # Module-level logger — format: [ERROR][evaluate] <message>
-# ---------------------------------------------------------------------------
 _log = logging.getLogger("evaluate")
 _handler = logging.StreamHandler(sys.stderr)
 _handler.setFormatter(logging.Formatter("[%(levelname)s][%(name)s] %(message)s"))
@@ -42,10 +41,10 @@ _log.addHandler(_handler)
 _log.setLevel(logging.INFO)
 _log.propagate = False
 
+RESULTS_DIR = os.environ.get("CANCER_HISTO_RESULTS_DIR", "artifacts/results")
 
-# ---------------------------------------------------------------------------
+
 # Helper: load YAML config
-# ---------------------------------------------------------------------------
 
 def load_config(config_path: str) -> dict:
     """Load and validate YAML config file.
@@ -77,9 +76,7 @@ def load_config(config_path: str) -> dict:
     return cfg
 
 
-# ---------------------------------------------------------------------------
 # Helper: load checkpoint
-# ---------------------------------------------------------------------------
 
 def load_checkpoint(ckpt_path: str, cfg: dict) -> "OrderedDict":
     """Load model_state from checkpoint.
@@ -116,11 +113,19 @@ def load_checkpoint(ckpt_path: str, cfg: dict) -> "OrderedDict":
     return ckpt["model_state"]
 
 
-# ---------------------------------------------------------------------------
 # Helper: build dataset
-# ---------------------------------------------------------------------------
 
-def build_dataset(cfg: dict):
+def _split_filename(cfg: dict, split: str, default_name: str) -> str:
+    split_files = cfg.get("split_files", {})
+    if split_files is None:
+        split_files = {}
+    if not isinstance(split_files, dict):
+        _log.error("split_files must be a mapping, got: %r", split_files)
+        sys.exit(1)
+    return str(split_files.get(split, default_name))
+
+
+def build_dataset(cfg: dict, split: str = "test"):
     """Instantiate the correct dataset class for the val/test split.
 
     Exits with code 2 if data paths do not exist.
@@ -129,6 +134,10 @@ def build_dataset(cfg: dict):
     dataset_name = cfg["dataset"]
     split_dir = cfg["split_dir"]
     data_root = cfg["data_root"]
+    split = str(split).strip().lower()
+    if split not in {"train", "val", "test"}:
+        _log.error("Invalid split '%s'. Expected train, val, or test.", split)
+        sys.exit(1)
 
     if not os.path.exists(split_dir):
         _log.error("split_dir does not exist: %s", split_dir)
@@ -138,14 +147,45 @@ def build_dataset(cfg: dict):
         _log.error("data_root does not exist: %s", data_root)
         sys.exit(2)
 
-    # Resolve test/val CSV path
-    # Convention: {split_dir}/{dataset}_test.csv or {split_dir}/{dataset}_val.csv
+    dataset_defaults = {
+        "breakhis": {
+            "train": "train.csv",
+            "val": "val.csv",
+            "test": "breakhis_test.csv",
+        },
+        "dlbcl": {
+            "train": "dlbcl_train.csv",
+            "val": "dlbcl_val.csv",
+            "test": "dlbcl_test.csv",
+        },
+    }
+    split_files = cfg.get("split_files", {}) or {}
+    has_explicit_split = isinstance(split_files, dict) and split in split_files
     csv_candidates = [
-        os.path.join(split_dir, f"{dataset_name}_test.csv"),
-        os.path.join(split_dir, f"{dataset_name}_val.csv"),
-        os.path.join(split_dir, "test.csv"),
-        os.path.join(split_dir, "val.csv"),
+        os.path.join(
+            split_dir,
+            _split_filename(cfg, split, dataset_defaults[dataset_name][split]),
+        )
     ]
+    if has_explicit_split:
+        pass
+    elif split == "test":
+        csv_candidates.extend([
+            os.path.join(split_dir, f"{dataset_name}_test.csv"),
+            os.path.join(split_dir, f"{dataset_name}_val.csv"),
+            os.path.join(split_dir, "test.csv"),
+            os.path.join(split_dir, "val.csv"),
+        ])
+    elif split == "val":
+        csv_candidates.extend([
+            os.path.join(split_dir, f"{dataset_name}_val.csv"),
+            os.path.join(split_dir, "val.csv"),
+        ])
+    else:
+        csv_candidates.extend([
+            os.path.join(split_dir, f"{dataset_name}_train.csv"),
+            os.path.join(split_dir, "train.csv"),
+        ])
     csv_path = None
     for candidate in csv_candidates:
         if os.path.exists(candidate):
@@ -167,14 +207,18 @@ def build_dataset(cfg: dict):
         dataset = BreaKHisDataset(csv_path=csv_path, data_root=data_root, mode="val")
     else:  # dlbcl
         from src.datasets.dlbcl_dataset import DLBCLDataset
-        dataset = DLBCLDataset(csv_path=csv_path, data_root=data_root, mode="val")
+        dataset = DLBCLDataset(
+            csv_path=csv_path,
+            data_root=data_root,
+            mode="val",
+            stain_normalization=bool(cfg.get("stain_normalization", False)),
+            stain_reference_path=str(cfg.get("stain_reference_path", "data/stain_reference.png")),
+        )
 
     return dataset
 
 
-# ---------------------------------------------------------------------------
 # Helper: run inference
-# ---------------------------------------------------------------------------
 
 def run_inference(model, dataset, batch_size: int = 32):
     """Run model inference on all samples in dataset.
@@ -216,9 +260,21 @@ def run_inference(model, dataset, batch_size: int = 32):
     return all_probs, all_labels, all_pids
 
 
-# ---------------------------------------------------------------------------
 # Helper: compute metrics
-# ---------------------------------------------------------------------------
+
+def _safe_roc_auc(labels, probs, metric_scope: str) -> float:
+    """Return 0.0 when AUC is undefined for a single-class evaluation set."""
+    unique_labels = set(labels)
+    if len(unique_labels) < 2:
+        _log.warning(
+            "%s evaluation set contains only one class (%s); AUC set to 0.0",
+            metric_scope,
+            unique_labels,
+        )
+        return 0.0
+
+    return roc_auc_score(labels, probs)
+
 
 def compute_image_level_metrics(probs, labels):
     """Compute image-level evaluation metrics.
@@ -228,7 +284,7 @@ def compute_image_level_metrics(probs, labels):
     preds = [1 if p >= 0.5 else 0 for p in probs]
 
     accuracy = sum(p == l for p, l in zip(preds, labels)) / len(labels)
-    auc = roc_auc_score(labels, probs)
+    auc = _safe_roc_auc(labels, probs, "Image-level")
     f1 = f1_score(labels, preds, average="weighted")
     cm = confusion_matrix(labels, preds).tolist()
 
@@ -240,52 +296,44 @@ def compute_image_level_metrics(probs, labels):
     }
 
 
-def compute_patient_level_metrics(probs, labels, pids):
-    """Compute patient-level evaluation metrics for DLBCL (max-pooling).
+def compute_patient_level_metrics(
+    probs,
+    labels,
+    pids,
+    aggregation: str = "max",
+    top_k: int = 10,
+    percentile: float = 95.0,
+    return_report: bool = False,
+):
+    """Compute patient-level evaluation metrics for DLBCL.
 
-    Aggregation (protocol.md §2):
-        patient_prob = max(patch_probs for same patient_id)
-        patient_pred = 1 if patient_prob >= 0.5 else 0
+    The returned ``metrics`` uses the selected aggregation method. The
+    companion report includes max/mean/top-k mean/percentile diagnostics.
 
-    Returns dict with accuracy, auc, f1, confusion_matrix.
+    Returns metrics by default, or (metrics, aggregation_report) when requested.
     """
-    # Aggregate by patient_id
-    patient_probs: dict = defaultdict(list)
-    patient_labels: dict = {}
-
-    for prob, label, pid in zip(probs, labels, pids):
-        patient_probs[pid].append(prob)
-        patient_labels[pid] = label  # all patches share same label
-
-    agg_probs = []
-    agg_labels = []
-    for pid in patient_probs:
-        agg_probs.append(max(patient_probs[pid]))
-        agg_labels.append(patient_labels[pid])
-
-    preds = [1 if p >= 0.5 else 0 for p in agg_probs]
-
-    accuracy = sum(p == l for p, l in zip(preds, agg_labels)) / len(agg_labels)
-    auc = roc_auc_score(agg_labels, agg_probs)
-    f1 = f1_score(agg_labels, preds, average="weighted")
-    cm = confusion_matrix(agg_labels, preds).tolist()
-
-    return {
-        "accuracy": round(accuracy, 3),
-        "auc": round(auc, 3),
-        "f1": round(f1, 3),
-        "confusion_matrix": cm,
-    }
+    report = compute_patient_aggregation_report(
+        probs=probs,
+        labels=labels,
+        patient_ids=pids,
+        selected_method=aggregation,
+        top_k=top_k,
+        percentile=percentile,
+        round_digits=3,
+        include_patients=True,
+    )
+    metrics = report["metrics_by_method"][report["selected"]]
+    if return_report:
+        return metrics, report
+    return metrics
 
 
-# ---------------------------------------------------------------------------
 # Main evaluation function
-# ---------------------------------------------------------------------------
 
-def evaluate(config_path: str, checkpoint_path: str) -> dict:
+def evaluate(config_path: str, checkpoint_path: str, split: str = "test") -> dict:
     """Full evaluation pipeline.
 
-    Returns the evaluation result dict (also written to results/).
+    Returns the evaluation result dict (also written to artifacts/results/).
     """
     # 1. Load config
     cfg = load_config(config_path)
@@ -306,7 +354,7 @@ def evaluate(config_path: str, checkpoint_path: str) -> dict:
         sys.exit(4)
 
     # 4. Build dataset
-    dataset = build_dataset(cfg)
+    dataset = build_dataset(cfg, split=split)
 
     if len(dataset) == 0:
         _log.error("Dataset is empty — no samples to evaluate")
@@ -319,24 +367,46 @@ def evaluate(config_path: str, checkpoint_path: str) -> dict:
     # 6. Compute metrics
     dataset_name = cfg["dataset"]
     if dataset_name == "dlbcl":
-        metrics = compute_patient_level_metrics(probs, labels, pids)
+        aggregation = cfg.get("patient_aggregation", "max")
+        top_k = int(cfg.get("patient_top_k", 10))
+        percentile = float(cfg.get("patient_percentile", 95.0))
+        metrics, patient_aggregation = compute_patient_level_metrics(
+            probs,
+            labels,
+            pids,
+            aggregation=aggregation,
+            top_k=top_k,
+            percentile=percentile,
+            return_report=True,
+        )
     else:
         metrics = compute_image_level_metrics(probs, labels)
+        patient_aggregation = None
 
     # 7. Build result dict
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     result = {
         "dataset": dataset_name,
+        "split": split,
+        "split_csv": getattr(dataset, "csv_path", None),
         "checkpoint": checkpoint_path,
         "timestamp": timestamp,
         "metrics": metrics,
     }
+    if patient_aggregation is not None:
+        result["patient_aggregation"] = patient_aggregation
 
     # 8. Write output JSON
-    os.makedirs("results", exist_ok=True)
-    output_path = os.path.join("results", f"{dataset_name}_eval.json")
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    suffix = f"_{split}"
+    output_path = os.path.join(RESULTS_DIR, f"{dataset_name}_eval{suffix}.json")
     with open(output_path, "w") as f:
         json.dump(result, f, indent=2)
+
+    if split == "test":
+        legacy_output_path = os.path.join(RESULTS_DIR, f"{dataset_name}_eval.json")
+        with open(legacy_output_path, "w") as f:
+            json.dump(result, f, indent=2)
 
     _log.info("Evaluation complete. Results written to: %s", output_path)
     _log.info("Metrics: %s", metrics)
@@ -344,128 +414,23 @@ def evaluate(config_path: str, checkpoint_path: str) -> dict:
     return result
 
 
-# ---------------------------------------------------------------------------
 # CLI entry point
-# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate a trained model checkpoint.")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file.")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pth checkpoint file.")
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="test",
+        choices=["train", "val", "test"],
+        help="Split to evaluate. Defaults to test, with legacy val fallback if no test CSV exists.",
+    )
     args = parser.parse_args()
 
-    evaluate(config_path=args.config, checkpoint_path=args.checkpoint)
+    evaluate(config_path=args.config, checkpoint_path=args.checkpoint, split=args.split)
 
 
 if __name__ == "__main__":
-    # If CLI args are provided, run as normal CLI tool.
-    # Otherwise, run the built-in DoD verification with fake data.
-    if "--config" in sys.argv and "--checkpoint" in sys.argv:
-        main()
-        sys.exit(0)
-
-    # -----------------------------------------------------------------------
-    # DoD verification: run full pipeline with fake checkpoint + fake dataset
-    # -----------------------------------------------------------------------
-    import csv
-    import re
-    import tempfile
-    from collections import OrderedDict
-
-    import numpy as np
-    from PIL import Image
-
-    logging.basicConfig(level=logging.INFO)
-
-    print("=== evaluate.py DoD verification ===")
-
-    # ── 1. Create temporary fake images + CSV ────────────────────────────
-    tmp_dir = tempfile.mkdtemp(prefix="eval_smoke_")
-    image_paths = []
-    for i in range(4):
-        img_array = np.random.randint(0, 256, (224, 224, 3), dtype=np.uint8)
-        img_path = os.path.join(tmp_dir, f"fake_{i}.png")
-        Image.fromarray(img_array).save(img_path)
-        image_paths.append(img_path)
-
-    csv_path = os.path.join(tmp_dir, "breakhis_test.csv")
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["filepath", "label", "patient_id", "magnification"])
-        writer.writerow([image_paths[0], 0, "SOB_B_A-001", "40x"])
-        writer.writerow([image_paths[1], 0, "SOB_B_A-002", "40x"])
-        writer.writerow([image_paths[2], 1, "SOB_M_DC-001", "40x"])
-        writer.writerow([image_paths[3], 1, "SOB_M_DC-002", "40x"])
-
-    # ── 2. Build fake model and save checkpoint ──────────────────────────
-    from src.models.classifier import build_classifier as _build
-
-    fake_model = _build(num_classes=2, pretrained=False)
-    ckpt_path = os.path.join(tmp_dir, "fake_best.pth")
-    torch.save(
-        {
-            "epoch": 1,
-            "model_state": fake_model.state_dict(),
-            "optim_state": OrderedDict(),
-            "best_auc": 0.5,
-            "config": {"model": "efficientnet_b2"},
-        },
-        ckpt_path,
-    )
-
-    # ── 3. Build fake YAML config ────────────────────────────────────────
-    fake_cfg = {
-        "dataset": "breakhis",
-        "data_root": tmp_dir,
-        "split_dir": tmp_dir,
-        "magnification": "40x",
-        "model": "efficientnet_b2",
-        "pretrained": False,
-        "num_classes": 2,
-        "batch_size": 4,
-        "lr": 1e-4,
-        "weight_decay": 1e-5,
-        "epochs": 1,
-        "amp": False,
-        "wandb": {"project": "test", "entity": "test"},
-    }
-    cfg_path = os.path.join(tmp_dir, "fake_breakhis.yaml")
-    with open(cfg_path, "w") as f:
-        yaml.dump(fake_cfg, f)
-
-    # ── 4. Run evaluate ──────────────────────────────────────────────────
-    result = evaluate(config_path=cfg_path, checkpoint_path=ckpt_path)
-
-    # ── 5. DoD ①: no errors raised, results file exists ─────────────────
-    output_json = os.path.join("results", "breakhis_eval.json")
-    assert os.path.exists(output_json), f"Output JSON not found: {output_json}"
-    print(f"DoD ①  output file exists: {output_json}")
-
-    # ── 6. DoD ②: JSON contains required keys ────────────────────────────
-    with open(output_json) as f:
-        loaded = json.load(f)
-
-    assert "accuracy" in loaded["metrics"], "Missing 'accuracy'"
-    assert "auc" in loaded["metrics"], "Missing 'auc'"
-    assert "f1" in loaded["metrics"], "Missing 'f1'"
-    assert "confusion_matrix" in loaded["metrics"], "Missing 'confusion_matrix'"
-    print(f"DoD ②  all required metric keys present: {list(loaded['metrics'].keys())}")
-
-    # ── 7. DoD ③: floats are rounded to 3 decimal places ─────────────────
-    for key in ("accuracy", "auc", "f1"):
-        val = loaded["metrics"][key]
-        assert isinstance(val, (int, float)), f"{key} is not numeric: {val}"
-        assert round(val, 3) == val, f"{key}={val} is not rounded to 3 decimals"
-    print(f"DoD ③  float values rounded to 3 decimals: accuracy={loaded['metrics']['accuracy']}, auc={loaded['metrics']['auc']}, f1={loaded['metrics']['f1']}")
-
-    # ── 8. DoD ④: ISO 8601 UTC timestamp ─────────────────────────────────
-    ts = loaded["timestamp"]
-    pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
-    assert re.match(pattern, ts), f"Timestamp '{ts}' does not match ISO 8601 UTC format"
-    print(f"DoD ④  timestamp format valid: {ts}")
-
-    # ── 9. Cleanup ───────────────────────────────────────────────────────
-    import shutil
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    print("\nAll DoD checks passed.")
+    main()

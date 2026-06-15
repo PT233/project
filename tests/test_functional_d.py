@@ -24,15 +24,11 @@ import yaml
 from PIL import Image
 from torch.utils.data import DataLoader
 
-# ---------------------------------------------------------------------------
 # Project root — ensure src/ is importable
-# ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# ---------------------------------------------------------------------------
 # Shared helpers
-# ---------------------------------------------------------------------------
 
 def _make_random_png(path: Path, w: int = 300, h: int = 400) -> Path:
     """Save a random RGB PNG to *path* and return path."""
@@ -128,9 +124,7 @@ def _make_yaml_config(cfg_path: Path, dataset: str, data_root: str, split_dir: s
         yaml.dump(cfg, f)
 
 
-# ---------------------------------------------------------------------------
 # FT-13: gradcam CLI exits 0 and produces a PNG file
-# ---------------------------------------------------------------------------
 
 class TestFT13:
     def test_ft13_gradcam_cli_exit_code_and_png(self, tmp_path):
@@ -170,9 +164,7 @@ class TestFT13:
         )
 
 
-# ---------------------------------------------------------------------------
 # FT-14: GradCAM output PNG pixel mean in (10, 245)
-# ---------------------------------------------------------------------------
 
 class TestFT14:
     def test_ft14_gradcam_output_pixel_mean(self, tmp_path):
@@ -214,9 +206,7 @@ class TestFT14:
         )
 
 
-# ---------------------------------------------------------------------------
 # IT-01: BreaKHis data layer → training layer — forward pass, loss not NaN
-# ---------------------------------------------------------------------------
 
 class TestIT01:
     def test_it01_breakhis_forward_pass_loss_not_nan(self, tmp_path):
@@ -243,9 +233,7 @@ class TestIT01:
         assert not torch.isnan(loss), f"Loss is NaN: {loss}"
 
 
-# ---------------------------------------------------------------------------
 # IT-02: DLBCL data layer → training layer — forward pass, loss not NaN
-# ---------------------------------------------------------------------------
 
 class TestIT02:
     def test_it02_dlbcl_forward_pass_loss_not_nan(self, tmp_path):
@@ -272,9 +260,7 @@ class TestIT02:
         assert not torch.isnan(loss), f"Loss is NaN: {loss}"
 
 
-# ---------------------------------------------------------------------------
 # IT-03: Both datasets produce batches with shape (3, 224, 224)
-# ---------------------------------------------------------------------------
 
 class TestIT03:
     def test_it03_breakhis_image_shape(self, tmp_path):
@@ -309,9 +295,7 @@ class TestIT03:
         )
 
 
-# ---------------------------------------------------------------------------
 # IT-04: Training layer → evaluate.py, BreaKHis — AUC in [0, 1]
-# ---------------------------------------------------------------------------
 
 class TestIT04:
     def test_it04_evaluate_breakhis_auc_in_range(self, tmp_path):
@@ -357,10 +341,8 @@ class TestIT04:
         assert 0.0 <= auc <= 1.0, f"AUC {auc} out of range [0, 1]"
 
 
-# ---------------------------------------------------------------------------
 # IT-05: Training layer → evaluate.py, DLBCL — confusion_matrix row/col sums
 #        equal number of unique patients (patient-level aggregation)
-# ---------------------------------------------------------------------------
 
 class TestIT05:
     def test_it05_evaluate_dlbcl_patient_level_cm(self, tmp_path):
@@ -406,9 +388,7 @@ class TestIT05:
         )
 
 
-# ---------------------------------------------------------------------------
 # IT-06: Training layer → GradCAM — output PNG size matches input image
-# ---------------------------------------------------------------------------
 
 class TestIT06:
     def test_it06_gradcam_output_size_matches_input(self, tmp_path):
@@ -453,7 +433,7 @@ class TestIT06:
         # resizes to 224×224. We verify that the output is a valid image with
         # consistent dimensions (not zero, not garbage), and matches what the
         # generate_gradcam function produces (224×224 per the implementation).
-        # Per the test spec: "output PNG 的尺寸与输入图像一致（宽高相同，即使有 overlay）"
+        # Per the test spec: output PNG size must match the input image (same H/W, even with overlay)
         # The implementation resizes to 224×224. We verify the output is 224×224.
         assert out_w == 224, f"Output width {out_w} != 224"
         assert out_h == 224, f"Output height {out_h} != 224"

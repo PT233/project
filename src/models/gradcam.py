@@ -102,7 +102,7 @@ def _preprocess_image(image_path: str) -> tuple[torch.Tensor, np.ndarray]:
 def generate_gradcam(
     image_path: str,
     checkpoint_path: str,
-    output_dir: str = "results/gradcam/",
+    output_dir: str = "artifacts/results/gradcam/",
 ) -> Path:
     """Generate a GradCAM overlay for *image_path* and save it to *output_dir*.
 
@@ -168,8 +168,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="results/gradcam/",
-        help="Output directory (default: results/gradcam/).",
+        default="artifacts/results/gradcam/",
+        help="Output directory (default: artifacts/results/gradcam/).",
     )
     return parser.parse_args(argv)
 
@@ -192,74 +192,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"GradCAM saved to: {out_path}")
 
 
-# ── DoD self-test ─────────────────────────────────────────────────────────── #
+# ── spec self-test ─────────────────────────────────────────────────────────── #
 
 if __name__ == "__main__":
-    # ---------------------------------------------------------------------- #
-    # When called directly without arguments, run the DoD verification.       #
-    # When called with arguments (--image etc.), run the CLI.                 #
-    # ---------------------------------------------------------------------- #
-    if len(sys.argv) > 1:
-        main()
-        sys.exit(0)
-
-    # ------------------------------------------------------------------ #
-    # DoD verification                                                     #
-    # ------------------------------------------------------------------ #
-    import tempfile
-    from collections import OrderedDict
-
-    logger.info("Running DoD self-test …")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-
-        # ── build a fake checkpoint ────────────────────────────────────── #
-        logger.info("DoD setup: building fake checkpoint …")
-        model_ref = build_classifier(num_classes=2, pretrained=False)
-        fake_ckpt = {
-            "epoch": 0,
-            "model_state": OrderedDict(model_ref.state_dict()),
-            "optim_state": OrderedDict(),
-            "best_auc": 0.5,
-            "config": {"num_classes": 2},
-        }
-        ckpt_path = tmp / "fake.pth"
-        torch.save(fake_ckpt, ckpt_path)
-        logger.info("DoD setup: checkpoint saved to '%s'", ckpt_path)
-
-        # ── build a random test image ──────────────────────────────────── #
-        logger.info("DoD setup: generating random test image …")
-        rng = np.random.default_rng(42)
-        img_array = (rng.integers(30, 220, size=(300, 400, 3), dtype=np.uint8))
-        img_path = tmp / "test_sample.png"
-        Image.fromarray(img_array).save(img_path)
-        logger.info("DoD setup: test image saved to '%s'", img_path)
-
-        # ── run generate_gradcam ───────────────────────────────────────── #
-        out_dir = tmp / "gradcam_out"
-        logger.info("DoD ①: running generate_gradcam …")
-        result_path = generate_gradcam(
-            image_path=str(img_path),
-            checkpoint_path=str(ckpt_path),
-            output_dir=str(out_dir),
-        )
-
-        # DoD ①: PNG file exists
-        assert result_path.exists(), f"Output PNG not found: {result_path}"
-        print(f"DoD ①  output PNG exists: {result_path}  ✓")
-
-        # DoD ③: filename contains original image stem
-        assert "test_sample" in result_path.name, (
-            f"Stem 'test_sample' not in output name '{result_path.name}'"
-        )
-        print(f"DoD ③  output filename contains original stem: '{result_path.name}'  ✓")
-
-        # DoD ②: pixel mean in (10, 245)
-        out_img = np.array(Image.open(result_path))
-        mean_val = float(out_img.mean())
-        assert mean_val > 10, f"Pixel mean too low (possibly all-black): {mean_val:.2f}"
-        assert mean_val < 245, f"Pixel mean too high (possibly all-white): {mean_val:.2f}"
-        print(f"DoD ②  pixel mean = {mean_val:.2f}  (in range 10–245)  ✓")
-
-    print("\nAll DoD checks passed.")
+    main()
